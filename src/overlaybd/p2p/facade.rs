@@ -1068,6 +1068,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overlaybd_registry_client_opens_and_reads_p2p_uuid_layer() {
+        let blob: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        let uuid = Uuid::new_v4();
+        let key = layer_artifact_key(&CanonicalBlobIdentity::from_uuid(&uuid));
+        let transport = Arc::new(MockTransport::default());
+        transport.descriptors.write().await.insert(
+            key.clone(),
+            uuid_layer_descriptor(key.clone(), uuid, blob.len() as u64),
+        );
+        transport
+            .blobs
+            .write()
+            .await
+            .insert(key, Bytes::from(blob.clone()));
+        let facade = start_test_facade(transport.clone(), Vec::new()).await;
+        let backend = ::overlaybd::backend::registryfs_v2::RegistryFsV2::new();
+
+        // Use the real reader so URL/auth probes obey the facade's Range contract.
+        let file = backend
+            .open(format!("{}/{}", facade.uuid_address(), uuid))
+            .await
+            .expect("open layer through p2p uuid facade");
+        assert_eq!(file.size().await.unwrap(), blob.len() as u64);
+        assert_eq!(
+            file.read_at(100, 100).await.unwrap().as_ref(),
+            &blob[100..200]
+        );
+        let mut tail = [0; 96];
+        assert_eq!(
+            file.read_at_into(4000, &mut tail).await.unwrap(),
+            tail.len()
+        );
+        assert_eq!(tail.as_slice(), &blob[4000..]);
+        assert!(transport.fetch_range_count.load(Ordering::Relaxed) > 0);
+
+        facade.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn p2p_uuid_miss_returns_not_found_without_origin_fallback() {
         let uuid = Uuid::parse_str("22222222-3333-4444-5555-666666666666").unwrap();
         let transport = Arc::new(MockTransport::default());
